@@ -34,7 +34,6 @@ from .const import (
     CONTEXT_MANAGE_USE_TOKENS,
     CONTEXT_MAX_MESSAGES,
     CONTEXT_MAX_TOKENS,
-    CONTEXT_SUMMARIZE_THRESHOLD,
     EMBEDDING_MODEL_PROMPT_TEMPLATE,
     RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
     RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
@@ -88,10 +87,11 @@ async def debug_memory(store, user_id="robot"):
         LOGGER.debug("MEMORY DEBUG ERROR: %s", repr(e))
 
 class State(MessagesState):
-    """Extend the MessagesState to include a summary key and model response metadata."""
+    """Extend MessagesState."""
 
     summary: str
     chat_model_usage_metadata: dict[str, Any]
+    messages_to_remove: list[AnyMessage]
 
 async def _call_model(
         state: State, config: RunnableConfig, *, store: BaseStore
@@ -127,7 +127,7 @@ async def _call_model(
     summary = state.get("summary", "")
     if summary:
         system_message += (
-            f"\n<conversation_summary>\n{summary}\n</conversation_summary>"
+            f"\n<past_conversation_summary>\n{summary}\n</past_conversation_summary>"
         )
 
     # Model input is the System Message plus current messages.
@@ -207,28 +207,32 @@ async def _call_model(
         LOGGER.error("Failed to store conversation: %s", repr(e))
 
     return {
-        "messages": [response, *remove_messages],
-        "chat_model_usage_metadata": metadata
+        "messages": response,
+        "chat_model_usage_metadata": metadata,
+        "messages_to_remove": messages_to_remove,
     }
 
-async def _summarize_messages(
+async def _summarize_and_remove_messages(
         state: State, config: RunnableConfig, *, store: BaseStore
-    ) -> dict[str, list[AnyMessage]]:
-    """Coroutine to summarize message history."""
+    ) -> dict[str, str | list[AnyMessage]]:
+    """Coroutine to summarize and remove messages."""
     summary = state.get("summary", "")
+    msgs_to_remove = state.get("messages_to_remove", [])
 
-    now = dt_util.now()
-    dattim = now.strftime("%Y-%m-%d %H:%M:%S")
+    if not msgs_to_remove:
+        return {"summary": summary}
 
     if summary:
         summary_message = SUMMARY_PROMPT_TEMPLATE.format(summary=summary)
     else:
         summary_message = SUMMARY_INITIAL_PROMPT
 
+    # Form the messages that will be used by the summarization model.
+    # The summary will be based on the messages that were trimmed away from the main
+    # model call, ignoring those from tools since the AI message encapsulates them.
     messages = (
         [SystemMessage(content=SUMMARY_SYSTEM_PROMPT)] +
-        [HumanMessage(content=f"These are the smart home messages as of {dattim}:")] +
-        [m.content for m in state["messages"] if isinstance(m,HumanMessage|AIMessage)] +
+        [m.content for m in msgs_to_remove if isinstance(m, HumanMessage|AIMessage)] +
         [HumanMessage(content=summary_message)]
     )
 
@@ -257,7 +261,10 @@ async def _summarize_messages(
     response = await model_with_config.ainvoke(messages)
     LOGGER.debug("Summary response: %s", response)
 
-    return {"summary": response.content}
+    return {
+        "summary": response.content,
+        "messages": [RemoveMessage(id=m.id) for m in msgs_to_remove],
+    }
 
 async def _call_tools(
         state: State, config: RunnableConfig, *, store: BaseStore
