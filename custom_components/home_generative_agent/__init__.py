@@ -141,6 +141,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: HGAConfigEntry) -> bool:
 
     entry.embedding_model = embedding_model
 
+    hass.data.setdefault(DOMAIN, {})["options"] = entry.options
+
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
 
     return True

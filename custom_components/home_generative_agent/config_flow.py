@@ -308,6 +308,11 @@ def config_option_schema(
                 description={"suggested_value": options.get(CONF_EMBEDDING_MODEL)},
                 default=RECOMMENDED_EMBEDDING_MODEL,
             ): str,
+            vol.Optional(
+                CONF_CAMERA_WEBHOOKS,
+                description={"suggested_value": options.get(CONF_CAMERA_WEBHOOKS, DEFAULT_CAMERA_WEBHOOKS)},
+                default=DEFAULT_CAMERA_WEBHOOKS,
+            ): dict,
         }
     )
     return schema

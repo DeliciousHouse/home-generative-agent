@@ -14,7 +14,9 @@
     "langchain-openai==0.2.13",
     "langchain-ollama==0.2.2",
     "langgraph==0.2.60",
-    "openai==1.58.1"
+    "openai==1.58.1",
+    "python-ulid==1.1.0",
+    "transformers"
   ],
   "version": "0.1.0"
 }

@@ -20,7 +20,7 @@ from homeassistant.util import ulid
 from langchain.globals import set_debug, set_verbose
 from langchain_core.caches import InMemoryCache
 from langchain_core.globals import set_llm_cache
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.store.memory import InMemoryStore
 
@@ -48,9 +48,15 @@ from .const import (
 from .graph import workflow
 from .tools import (
     add_automation,
+    analyze_patterns,
     get_and_analyze_camera_image,
     get_current_device_state,
     get_entity_history,
+    manage_scene,
+    perform_location_action,
+    reverse_geocode,
+    run_diagnostics,
+    suggest_contextual_automation,
     upsert_memory,
 )
 from .utilities import format_tool, generate_embeddings
@@ -146,7 +152,7 @@ class HGAConversationEntity(
             self.entry.add_update_listener(self._async_entry_update_listener)
         )
 
-    async def async_will_remove_from_hass(self) -> None:
+    async def async_will_remove_from_hass() -> None:
         """When entity will be removed from Home Assistant."""
         conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
@@ -191,34 +197,65 @@ class HGAConversationEntity(
                 return conversation.ConversationResult(
                     response=intent_response, conversation_id=user_input.conversation_id
                 )
+            except Exception as err:  # Catch any unexpected errors during API retrieval
+                LOGGER.error("Unexpected error getting LLM API: %s", err, exc_info=True)
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN,
+                    "Sorry, I encountered an unexpected error while setting up the LLM API.",
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=user_input.conversation_id
+                )
             tools = [
-               format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
+                format_tool(tool, llm_api.custom_serializer) for tool in llm_api.tools
             ]
 
         # Add langchain tools to the list of HA tools.
         langchain_tools = {
-            "get_and_analyze_camera_image": get_and_analyze_camera_image,
-            "upsert_memory": upsert_memory,
             "add_automation": add_automation,
-            "get_entity_history": get_entity_history,
+            "analyze_patterns": analyze_patterns,
+            "get_and_analyze_camera_image": get_and_analyze_camera_image,
             "get_current_device_state": get_current_device_state,
+            "get_entity_history": get_entity_history,
+            "manage_scene": manage_scene,
+            "perform_location_action": perform_location_action,
+            "reverse_geocode": reverse_geocode,
+            "run_diagnostics": run_diagnostics,
+            "suggest_contextual_automation": suggest_contextual_automation,
+            "upsert_memory": upsert_memory,
         }
         tools.extend(langchain_tools.values())
 
-        # Conversation IDs are ULIDs. Generate a new one if not provided.
-        # If an old ULID is passed in, generate a new one to indicate
-        # a new conversation was started. If the user picks their own, they
-        # want to track a conversation, so respect it.
+        # Check if there's a recent conversation thread to continue
         if user_input.conversation_id is None:
-            conversation_id = ulid.ulid_now()
-        elif user_input.conversation_id in self.app_config["configurable"].values():
-            conversation_id = user_input.conversation_id
-        else:
+            """
+            # Look for recent conversations for this user
             try:
-                ulid.ulid_to_bytes(user_input.conversation_id)
+                user_name = "robot" if user_name is None else user_name
+                store = self.app.executor.store
+                recent_convos = await store.asearch(
+                    (user_name, "conversations"),
+                    query=None,
+                    limit=1
+                )
+
+                # If found recent conversation, use that thread ID
+                if recent_convos:
+                    conversation_id = recent_convos[0].key[2]  # Extract thread ID
+                    LOGGER.debug("Continuing conversation with ID: %s", conversation_id)
+                else:
+                    # Create a new thread if no recent ones
+                    conversation_id = ulid.ulid_now()
+            except Exception as err:
+                # Fallback to new conversation ID
+                LOGGER.warning("Error finding recent conversation: %s", err)
                 conversation_id = ulid.ulid_now()
-            except ValueError:
-                conversation_id = user_input.conversation_id
+            """
+            # Create a new conversation ID
+            conversation_id = ulid.ulid_now()
+        else:
+            # Use provided conversation ID
+            conversation_id = user_input.conversation_id
 
         if (
             user_input.context
@@ -227,7 +264,17 @@ class HGAConversationEntity(
                 user := await hass.auth.async_get_user(user_input.context.user_id)
             )
         ):
-            user_name = user.name
+            try:
+                user_name = user.name
+            except Exception as err:  # Catch any unexpected errors during user retrieval
+                LOGGER.error("Unexpected error getting user name: %s", err, exc_info=True)
+                intent_response.async_set_error(
+                    intent.IntentResponseErrorCode.UNKNOWN,
+                    "Sorry, I encountered an unexpected error while retrieving your user information.",
+                )
+                return conversation.ConversationResult(
+                    response=intent_response, conversation_id=conversation_id
+                )
 
         try:
             prompt_parts = [
@@ -255,6 +302,16 @@ class HGAConversationEntity(
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
                 f"Sorry, I had a problem with my template: {err}",
+            )
+            return conversation.ConversationResult(
+                response=intent_response, conversation_id=conversation_id
+            )
+        except Exception as err:  # Catch any unexpected errors during prompt rendering
+            LOGGER.error("Unexpected error rendering prompt: %s", err, exc_info=True)
+            intent_response = intent.IntentResponse(language=user_input.language)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                "Sorry, I encountered an unexpected error while preparing the prompt.",
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
@@ -335,26 +392,82 @@ class HGAConversationEntity(
 
         # Interact with app.
         try:
+            """
+            # First try to retrieve conversation history
+            previous_messages = []
+            try:
+                user_name = self.app_config["configurable"]["user_id"]
+                store = self.app.executor.store
+
+                # Get previous conversations for this user
+                recent_contexts = await store.asearch(
+                    (user_name, "conversations"),
+                    query=None,
+                    limit=7  # Last 7 conversation turns
+                )
+
+                # Process in chronological order (oldest first)
+                sorted_contexts = sorted(
+                    recent_contexts,
+                    key=lambda x: x.value.get("timestamp", "")
+                )
+
+                # Build message history
+                for context in sorted_contexts:
+                    if isinstance(context.value, dict) and "messages" in context.value:
+                        for msg in context.value["messages"]:
+                            if msg.get("role") == "user":
+                                previous_messages.append(HumanMessage(content=msg.get("content", "")))
+                            elif msg.get("role") == "assistant":
+                                previous_messages.append(AIMessage(content=msg.get("content", "")))
+
+                LOGGER.debug("Retrieved %s previous messages for context", len(previous_messages))
+            except Exception as err:
+                LOGGER.warning("Failed to retrieve conversation history: %s", err)
+            """
+            # Use only current message
+            previous_messages = []
+
+            # Add current message
+            previous_messages.append(HumanMessage(content=user_input.text))
+
+            # Invoke with full conversation history
             response = await self.app.ainvoke(
-                {"messages": [HumanMessage(content=user_input.text)]},
+                {"messages": previous_messages},
                 config=self.app_config
             )
-        except HomeAssistantError as err:
-            LOGGER.error(err, exc_info=err)
+
+            """
+            # Store the conversation for future context retrieval
+            user_name = self.app_config["configurable"]["user_id"]
+            store = self.app.executor.store
+
+            # Format messages for storage
+            conversation_data = {
+                "messages": [
+                    {"role": "user", "content": user_input.text},
+                    {"role": "assistant", "content": response["messages"][-1].content}
+                ],
+                "timestamp": dt_util.now().isoformat(),
+            }
+
+            # Store in vector database for later retrieval
+            try:
+                await store.aput(
+                    (user_name, "conversations", ulid.ulid_now()),
+                    conversation_data,
+                    content=f"User: {user_input.text}\nAssistant: {response['messages'][-1].content}"
+                )
+            except Exception as err:
+                LOGGER.warning("Failed to store conversation for context: %s", err)
+            """
+
+        except Exception as err:  # Catch all exceptions here
+            LOGGER.error("An unexpected error occurred: %s", err, exc_info=True)  # Log the full traceback
             intent_response = intent.IntentResponse(language=user_input.language)
             intent_response.async_set_error(
                 intent.IntentResponseErrorCode.UNKNOWN,
-                f"Something went wrong: {err}",
-            )
-            return conversation.ConversationResult(
-                response=intent_response, conversation_id=conversation_id
-            )
-        except Exception as err:
-            LOGGER.error(err, exc_info=err)
-            intent_response = intent.IntentResponse(language=user_input.language)
-            intent_response.async_set_error(
-                intent.IntentResponseErrorCode.UNKNOWN,
-                f"Something went wrong: {err}",
+                "Sorry, I encountered an unexpected error while processing your request.",
             )
             return conversation.ConversationResult(
                 response=intent_response, conversation_id=conversation_id
@@ -368,7 +481,20 @@ class HGAConversationEntity(
         LOGGER.debug("====== End of run ======")
 
         intent_response = intent.IntentResponse(language=user_input.language)
-        intent_response.async_set_speech(response["messages"][-1].content)
+        try:
+            intent_response.async_set_speech(response["messages"][-1].content)
+        except IndexError:  # Handle potential IndexError if no messages are returned
+            LOGGER.error("No response messages were generated.")
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                "Sorry, I was unable to generate a response.",
+            )
+        except Exception as err:  # Catch any unexpected errors during response processing
+            LOGGER.error("Unexpected error processing response: %s", err, exc_info=True)
+            intent_response.async_set_error(
+                intent.IntentResponseErrorCode.UNKNOWN,
+                "Sorry, I encountered an unexpected error while generating the response.",
+            )
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )

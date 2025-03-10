@@ -36,10 +36,10 @@ triggers:
 conditions:
   - condition: numeric_state
     entity_id: sensor.litter_robot_4_waste_drawer
-    above: 90
+    above: 80
 actions:
   - data:
-      message: The Litter Box waste drawer is more than 90% full!
+      message: The Litter Box waste drawer is more than 80% full!
     action: notify.notify
 ```
 
@@ -87,7 +87,7 @@ actions:
 ### Check a camera for packages.
 ![Alt text](./assets/check-for-boxes.png)
 
-Below is the camera image the agent analyzed, you can see that two packages are visible. 
+Below is the camera image the agent analyzed, you can see that two packages are visible.
 
 ![Alt text](./assets/check-for-boxes-pic.png)
 

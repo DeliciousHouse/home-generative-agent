@@ -63,9 +63,9 @@ CONTEXT_MANAGE_USE_TOKENS = True
 # context length limits will be reached.
 # Assume worse case message is 300 tokens -> 100 messages in context will be 30k tokens.
 # So, with 100 messages in context calls to OpenAI can be as frequent as 1 per minute.
-CONTEXT_MAX_MESSAGES = 100
+CONTEXT_MAX_MESSAGES = 200
 # If number of messages in context > CONTEXT_SUMMARIZE_THRESHOLD, generate a summary.
-CONTEXT_SUMMARIZE_THRESHOLD = 20
+CONTEXT_SUMMARIZE_THRESHOLD = 40
 # CONTEXT_MAX_TOKENS sets the limit on how large the context can grow. This should be
 # no larger than CHAT_MODEL_NUM_CTX. Only used if context size is managed by tokens.
 #
@@ -88,13 +88,13 @@ Call the tool again with your mistake corrected.
 
 ### Ollama edge chat model parameters. ###
 # Edge chat model server URL.
-EDGE_CHAT_MODEL_URL = "192.168.1.252:11434"
+EDGE_CHAT_MODEL_URL = "192.168.86.13:11434"
 # Maximum number of tokens to predict when generating text.
 EDGE_CHAT_MODEL_NUM_PREDICT = 4096
 
 ### Ollama VLM parameters. ###
 # Ollama VLM server URL.
-VLM_URL = "192.168.1.252:11434"
+VLM_URL = "192.168.86.13:11434"
 # Ollama VLM maximum number of output tokens to generate.
 VLM_NUM_PREDICT = 4096
 # Sets the size of the context window used to generate the next token.
@@ -110,7 +110,7 @@ VISION_MODEL_IMAGE_HEIGHT = 1080
 
 ### Ollama summarization model parameters. ###
 # Model server URL.
-SUMMARIZATION_MODEL_URL = "192.168.1.252:11434"
+SUMMARIZATION_MODEL_URL = "192.168.86.13:11434"
 # Maximum number of tokens to predict when generating text.
 SUMMARIZATION_MODEL_PREDICT = 4096
 # Sets the size of the context window used to generate the next token.
@@ -125,11 +125,14 @@ Update the summary by taking into account the new smart home messages above:
 """
 
 ### Ollama embedding model parameters. ###
-EMBEDDING_MODEL_URL = "192.168.1.252:11434"
+EMBEDDING_MODEL_URL = "192.168.86.13:11434"
 EMBEDDING_MODEL_DIMS = 512
 EMBEDDING_MODEL_PROMPT_TEMPLATE = """
 Represent this sentence for searching relevant passages: {query}
 """
+
+CONF_CAMERA_WEBHOOKS = "camera_webhooks"
+DEFAULT_CAMERA_WEBHOOKS = {}  # Default empty dict of camera_name: webhook_url mappings
 
 EVENT_AUTOMATION_REGISTERED = "automation_registered_via_home_generative_agent"
 

@@ -1,13 +1,16 @@
 """Langgraph tools for Home Generative Agent."""
 from __future__ import annotations
 
+import aiohttp
 import base64
 import logging
 import math
+import os
 from datetime import timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, Dict, List
 
+import re
 import aiofiles
 import homeassistant.util.dt as dt_util
 import yaml
@@ -60,8 +63,34 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
-    """Get an image from a given camera."""
-    camera_entity_id: str = f"camera.{camera_name.lower()}"
+    """Get an image from a given camera using HA or webhook."""
+    options = hass.data[DOMAIN].get("options", {})
+    camera_webhooks = options.get(CONF_CAMERA_WEBHOOKS, DEFAULT_CAMERA_WEBHOOKS)
+
+    # Check if this camera has a webhook URL configured
+    webhook_url = camera_webhooks.get(camera_name.lower().replace(' ', '_'))
+
+    if webhook_url:
+        try:
+            LOGGER.debug("Using webhook URL for camera %s: %s", camera_name, webhook_url)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(webhook_url) as response:
+                    if response.status == 200:
+                        return await response.read()
+                    else:
+                        LOGGER.error(
+                            "Error getting image from webhook for camera '%s'. Status: %s",
+                            camera_name, response.status
+                        )
+        except Exception as err:
+            LOGGER.error(
+                "Error getting image from webhook for camera '%s': %s",
+                camera_name, err
+            )
+            # Fall back to standard HA method if webhook fails
+
+    # Standard HA camera entity method
+    camera_entity_id: str = f"camera.{camera_name.strip().lower().replace(' ', '_')}"
     try:
         image = await camera.async_get_image(
             hass=hass,
@@ -158,7 +187,7 @@ async def get_and_analyze_camera_image( # noqa: D417
     Args:
         camera_name: Name of the camera for scene analysis.
         detection_keywords: Specific objects to look for in image, if any.
-            For example, If user says "check the front porch camera for
+            Such as if user says "check the front porch camera for
             boxes and dogs", detection_keywords would be ["boxes", "dogs"].
 
     """
@@ -178,24 +207,23 @@ async def upsert_memory( # noqa: D417
     memory_id: str = "",
     # Hide these arguments from the model.
     config: Annotated[RunnableConfig, InjectedToolArg()],
-    store: Annotated[BaseStore, InjectedStore()],
+    store: Annotated[BaseStore, InjectedToolArg()],
 ) -> str:
     """
     INSERT or UPDATE a memory in the database.
     You MUST use this tool to INSERT or UPDATE memories about users.
-    Examples of memories are specific facts or concepts learned from interactions
+    Such as memories are specific facts or concepts learned from interactions
     with users. If a memory conflicts with an existing one then just UPDATE the
     existing one by passing in "memory_id" and DO NOT create two memories that are
     the same. If the user corrects a memory then UPDATE it.
 
     Args:
         content: The main content of the memory.
-            e.g., "I would like to learn french."
+            Such as "I would like to learn french."
         context: Additional relevant context for the memory, if any.
-            e.g., "This was mentioned while discussing career options in Europe."
+            Such as "This was mentioned while discussing career options in Europe."
         memory_id: The memory to overwrite.
             ONLY PROVIDE IF UPDATING AN EXISTING MEMORY.
-            
 
     """
     mem_id = memory_id or ulid.ulid_now()
@@ -308,7 +336,7 @@ async def get_entity_history(  # noqa: D417
 
     Args:
         entity_ids: List of Home Assistant entity ids to retrieve the history for.
-            For example if the user says "how much energy did the washing machine
+            Such as if the user says "how much energy did the washing machine
             consume last week", entity_id is "sensor.washing_machine_switch_0_energy"
             DO NOT use use the name "washing machine Switch 0 energy" for entity_id.
             You MUST use an underscore symbol (e.g., "_") as a word deliminator.
@@ -486,3 +514,645 @@ async def get_current_device_state( # noqa: D417
         state_dict[name] = state
 
     return state_dict
+
+@tool(parse_docstring=True)
+async def manage_scene( # noqa: D417
+    action: str,
+    scene_name: str,
+    location: str,
+    scene_data: Dict[str, Any] = None,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+    store: Annotated[BaseStore, InjectedToolArg()],
+) -> str:
+    """
+    Manage scenes in different locations of the home.
+
+    Args:
+        action: Action to perform (create, update, get, delete).
+        scene_name: Name of the scene to manage.
+        location: Location where the scene applies.
+        scene_data: Scene configuration data.
+    """
+    scene_id = f"{location.lower()}_{scene_name.lower()}"
+
+    if action == "create" or action == "update":
+        if not scene_data:
+            return "Scene data is required for create/update operations"
+
+        await store.aput(
+            namespace=(config["configurable"]["user_id"], "scenes"),
+            key=scene_id,
+            value={
+                "name": scene_name,
+                "location": location,
+                "data": scene_data
+            }
+        )
+        return f"Scene '{scene_name}' {'created' if action == 'create' else 'updated'} for {location}"
+
+    elif action == "get":
+        scene = await store.aget(
+            namespace=(config["configurable"]["user_id"], "scenes"),
+            key=scene_id
+        )
+        if not scene:
+            return f"Scene '{scene_name}' not found in {location}"
+        return scene
+
+    elif action == "delete":
+        await store.adelete(
+            namespace=(config["configurable"]["user_id"], "scenes"),
+            key=scene_id
+        )
+        return f"Scene '{scene_name}' deleted from {location}"
+
+    return f"Invalid action '{action}'. Must be one of: create, update, get, delete"
+
+@tool(parse_docstring=True)
+async def perform_location_action( # noqa: D417
+    location: str,
+    action: str,
+    entities: List[str] = None,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()]
+) -> str:
+    """
+    Perform actions on entities in a specific location.
+
+    Args:
+        location: Location to perform action in.
+        action: Action to perform (turn_on, turn_off).
+        entities: Optional list of specific entities.
+    """
+    hass = config["configurable"]["hass"]
+
+    # Validate location exists
+    location = location.lower()
+    area_registry = hass.data["area_registry"]
+    area = next((area for area in area_registry.areas if area.name.lower() == location), None)
+
+    if not area:
+        return f"Location '{location}' not found"
+
+    # Get entities for the location
+    device_registry = hass.data["device_registry"]
+    entity_registry = hass.data["entity_registry"]
+
+    # If no specific entities provided, get all entities in the location
+    if not entities:
+        location_entities = [
+            entity.entity_id for entity in entity_registry.entities.values()
+            if entity.area_id == area.id
+        ]
+    else:
+        location_entities = entities
+
+    if not location_entities:
+        return f"No entities found in {location}"
+
+    # Perform the action
+    try:
+        if action == "turn_on":
+            for entity_id in location_entities:
+                await hass.services.async_call(
+                    domain="homeassistant",
+                    service="turn_on",
+                    target={"entity_id": entity_id}
+                )
+        elif action == "turn_off":
+            for entity_id in location_entities:
+                await hass.services.async_call(
+                    domain="homeassistant",
+                    service="turn_off",
+                    target={"entity_id": entity_id}
+                )
+        else:
+            return f"Unsupported action: {action}"
+
+        return f"Successfully performed '{action}' in {location}"
+
+    except HomeAssistantError as err:
+        return f"Error performing action: {err}"
+
+
+@tool(parse_docstring=True)
+async def reverse_geocode( # noqa: D417
+    latitude: float,
+    longitude: float,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()]
+) -> dict[str, Any]:
+    """
+    Convert latitude and longitude coordinates to a physical address.
+
+    Args:
+        latitude: Latitude coordinate (such as 38.30662).
+        longitude: Longitude coordinate (such as -122.29125).
+
+    Returns:
+        Dictionary containing address information.
+    """
+    # Using OpenStreetMap's Nominatim service (free but has usage limits)
+    url = f"https://nominatim.openstreetmap.org/reverse?lat={latitude}&lon={longitude}&format=json"
+
+    async with aiohttp.ClientSession() as session:
+        async with session.get(url, headers={"User-Agent": "HomeAssistantComponent/1.0"}) as response:
+            if response.status == 200:
+                result = await response.json()
+                return {
+                    "full_address": result.get("display_name", "Unknown location"),
+                    "road": result.get("address", {}).get("road"),
+                    "city": result.get("address", {}).get("city"),
+                    "county": result.get("address", {}).get("county"),
+                    "state": result.get("address", {}).get("state"),
+                    "country": result.get("address", {}).get("country"),
+                    "postcode": result.get("address", {}).get("postcode"),
+                }
+            else:
+                return {"error": f"Failed to geocode: HTTP {response.status}"}
+
+
+@tool(parse_docstring=True)
+async def suggest_contextual_automation( # noqa: D417
+    context_description: str,
+    timeframe_days: int = 7,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()],
+    store: Annotated[BaseStore, InjectedToolArg()],
+) -> dict[str, Any]:
+    """
+    Suggests automations based on user behavior patterns and smart home context.
+
+    Args:
+        context_description: Description of the context for which automation suggestions
+            are requested. Like, "energy saving when nobody is home" or
+            "morning routines on weekdays".
+        timeframe_days: Number of days of historical data to analyze for patterns.
+            Default is 7 days.
+
+    Returns:
+        Dictionary containing suggested automations with details, rationale, and confidence scores.
+    """
+    hass = config["configurable"]["hass"]
+    user_id = config["configurable"]["user_id"]
+
+    # Get information about the smart home's devices and areas
+    device_registry = hass.data["device_registry"]
+    area_registry = hass.data["area_registry"]
+    entity_registry = hass.data["entity_registry"]
+
+    # Get a list of areas with their entities
+    areas_with_entities = {}
+    for area in area_registry.areas.values():
+        area_entities = [
+            entity_id for entity_id, entity in entity_registry.entities.items()
+            if entity.area_id == area.id
+        ]
+        if area_entities:
+            areas_with_entities[area.name] = area_entities
+
+    # Get recent history for relevant entities based on context
+    now = dt_util.utcnow()
+    start_time = now - timedelta(days=timeframe_days)
+
+    # Extract relevant entities from the context description
+    relevant_domains = []
+    if "light" in context_description.lower() or "lighting" in context_description.lower():
+        relevant_domains.append("light")
+    if "heat" in context_description.lower() or "temperature" in context_description.lower():
+        relevant_domains.append("climate")
+    if "security" in context_description.lower() or "camera" in context_description.lower():
+        relevant_domains.append("camera")
+
+    # Default to common domains if no specific domain was identified
+    if not relevant_domains:
+        relevant_domains = ["light", "switch", "sensor", "binary_sensor", "climate"]
+
+    # Generate automation suggestions based on context and entity history
+    suggestions = []
+
+    # Example: Morning routine automation
+    if "morning" in context_description.lower() or "wake up" in context_description.lower():
+        suggestions.append({
+            "name": "Morning Routine",
+            "description": "Gradually turn on lights and adjust temperature in the morning",
+            "trigger": {"platform": "time", "at": "06:30:00"},
+            "conditions": [{"condition": "time", "weekday": ["mon", "tue", "wed", "thu", "fri"]}],
+            "actions": [
+                {"service": "light.turn_on", "target": {"area_id": "bedroom"}, "data": {"brightness_pct": 40}},
+                {"service": "climate.set_temperature", "target": {"area_id": "living_room"}, "data": {"temperature": 21}}
+            ],
+            "confidence": 0.85,
+            "rationale": "Based on regular weekday morning activity patterns"
+        })
+
+    # Example: Energy saving automation
+    if "energy" in context_description.lower() or "saving" in context_description.lower():
+        suggestions.append({
+            "name": "Energy Saving Mode",
+            "description": "Turn off non-essential devices when nobody is home",
+            "trigger": {"platform": "state", "entity_id": "binary_sensor.presence", "to": "off"},
+            "actions": [
+                {"service": "light.turn_off", "target": {"area_id": "living_room"}},
+                {"service": "switch.turn_off", "target": {"entity_id": "switch.non_essential_devices"}},
+                {"service": "climate.set_temperature", "target": {"area_id": "house"}, "data": {"temperature": 18}}
+            ],
+            "confidence": 0.9,
+            "rationale": "Based on energy usage patterns when home is unoccupied"
+        })
+
+    # Example: Security automation
+    if "security" in context_description.lower() or "away" in context_description.lower():
+        suggestions.append({
+            "name": "Security Mode",
+            "description": "Enhance security when everyone is away",
+            "trigger": {"platform": "state", "entity_id": "group.household", "to": "not_home"},
+            "actions": [
+                {"service": "alarm_control_panel.alarm_arm_away", "target": {"entity_id": "alarm_control_panel.home_alarm"}},
+                {"service": "light.turn_on", "target": {"area_id": "exterior"}, "data": {"brightness_pct": 30}},
+                {"service": "script.simulate_presence", "data": {}}
+            ],
+            "confidence": 0.8,
+            "rationale": "Based on security preferences and activity patterns during away times"
+        })
+
+    # Retrieve any user-specific memory about automation preferences
+    user_memory = await store.asearch(
+        namespace=(user_id, "memories"),
+        query="automation preferences",
+        limit=5
+    )
+
+    # Add additional context from user memories
+    automation_context = {}
+    if user_memory:
+        automation_context["user_preferences"] = [mem.value for mem in user_memory]
+
+    return {
+        "suggestions": suggestions,
+        "context": automation_context,
+        "timeframe_analyzed": f"{timeframe_days} days"
+    }
+
+@tool(parse_docstring=True)
+async def analyze_patterns( # noqa: D417
+    entity_ids: list[str],
+    pattern_type: str,
+    time_period_days: int = 14,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()]
+) -> dict[str, Any]:
+    """
+    Analyzes entity history to identify patterns, trends, or anomalies in data.
+
+    Args:
+        entity_ids: List of entity IDs to analyze for patterns.
+            Such as ["sensor.power_consumption", "binary_sensor.motion_sensor"]
+        pattern_type: Type of pattern analysis to perform.
+            Options include "usage_patterns", "anomaly_detection", "correlation",
+            "cyclic_patterns", "trend_analysis"
+        time_period_days: Number of days of historical data to analyze.
+            Default is 14 days.
+
+    Returns:
+        Dictionary containing detected patterns, insights, and statistical data.
+    """
+    hass = config["configurable"]["hass"]
+
+    # Validate entity_ids
+    entity_registry = hass.data["entity_registry"]
+    valid_entities = []
+    for entity_id in entity_ids:
+        if entity_id in entity_registry.entities or entity_id in hass.states.async_entity_ids():
+            valid_entities.append(entity_id)
+
+    if not valid_entities:
+        return {"error": "No valid entity IDs provided"}
+
+    # Set time period for analysis
+    now = dt_util.utcnow()
+    start_time = now - timedelta(days=time_period_days)
+
+    # Get entity history data
+    with recorder.util.session_scope(hass=hass, read_only=True) as session:
+        history = await recorder.get_instance(hass).async_add_executor_job(
+            recorder.history.get_significant_states_with_session,
+            hass,
+            session,
+            start_time,
+            now,
+            valid_entities,
+            None,  # No filters
+            True,  # include_start_time_state
+            True,  # significant_changes_only
+            True,  # minimal_response
+            False, # no_attributes
+            False  # compressed_state_format
+        )
+
+    if not history:
+        return {"error": "No historical data found for the specified entities"}
+
+    # Extract state values and timestamps
+    processed_data = {}
+    for entity_id, states in history.items():
+        # Convert State objects to usable data
+        data_points = []
+        for state in states:
+            if isinstance(state, State):
+                state_dict = state.as_dict()
+            else:
+                state_dict = state
+
+            try:
+                # Try to convert state to float for numerical analysis
+                value = float(state_dict.get("state", 0))
+                timestamp = state_dict.get("last_changed")
+                if timestamp:
+                    # Convert to datetime if it's a string
+                    if isinstance(timestamp, str):
+                        timestamp = dt_util.parse_datetime(timestamp)
+                    data_points.append({"timestamp": timestamp, "value": value})
+            except (ValueError, TypeError):
+                # Handle non-numeric states
+                value = state_dict.get("state")
+                timestamp = state_dict.get("last_changed")
+                if timestamp and value:
+                    if isinstance(timestamp, str):
+                        timestamp = dt_util.parse_datetime(timestamp)
+                    data_points.append({"timestamp": timestamp, "value": value})
+
+        processed_data[entity_id] = data_points
+
+    # Analyze data based on pattern_type
+    analysis_results = {}
+
+    if pattern_type == "usage_patterns":
+        # Identify times of day with highest/lowest usage
+        for entity_id, data_points in processed_data.items():
+            if not data_points:
+                continue
+
+            # Group data by hour of day
+            hourly_data = {}
+            for point in data_points:
+                if isinstance(point["value"], (int, float)):
+                    hour = point["timestamp"].hour
+                    hourly_data.setdefault(hour, []).append(point["value"])
+
+            # Calculate average value for each hour
+            hourly_averages = {hour: sum(values)/len(values) for hour, values in hourly_data.items() if values}
+
+            if hourly_averages:
+                peak_hour = max(hourly_averages, key=hourly_averages.get)
+                low_hour = min(hourly_averages, key=hourly_averages.get)
+
+                analysis_results[entity_id] = {
+                    "peak_usage_hour": peak_hour,
+                    "peak_value": hourly_averages[peak_hour],
+                    "lowest_usage_hour": low_hour,
+                    "lowest_value": hourly_averages[low_hour],
+                    "hourly_profile": hourly_averages
+                }
+
+    elif pattern_type == "anomaly_detection":
+        # Simple anomaly detection using standard deviation
+        for entity_id, data_points in processed_data.items():
+            numeric_values = [point["value"] for point in data_points
+                             if isinstance(point["value"], (int, float))]
+
+            if len(numeric_values) > 5:  # Need sufficient data points
+                mean = sum(numeric_values) / len(numeric_values)
+                variance = sum((x - mean) ** 2 for x in numeric_values) / len(numeric_values)
+                std_dev = math.sqrt(variance)
+
+                # Find outliers (values more than 2 standard deviations from mean)
+                outliers = []
+                for point in data_points:
+                    if isinstance(point["value"], (int, float)):
+                        if abs(point["value"] - mean) > 2 * std_dev:
+                            outliers.append({
+                                "timestamp": point["timestamp"].isoformat(),
+                                "value": point["value"],
+                                "deviation": (point["value"] - mean) / std_dev
+                            })
+
+                analysis_results[entity_id] = {
+                    "mean": mean,
+                    "std_dev": std_dev,
+                    "outliers": outliers
+                }
+
+    elif pattern_type == "cyclic_patterns":
+        # Detect daily/weekly cycles
+        for entity_id, data_points in processed_data.items():
+            if len(data_points) > 24:  # Need at least a day of data
+                # Group by day of week
+                daily_patterns = {i: [] for i in range(7)}  # 0 = Monday
+                for point in data_points:
+                    if isinstance(point["value"], (int, float)):
+                        weekday = point["timestamp"].weekday()
+                        daily_patterns[weekday].append(point["value"])
+
+                # Calculate average value for each day
+                day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+                day_averages = {}
+                for day_num, values in daily_patterns.items():
+                    if values:
+                        day_averages[day_names[day_num]] = sum(values) / len(values)
+
+                analysis_results[entity_id] = {
+                    "daily_patterns": day_averages,
+                    "highest_day": max(day_averages, key=day_averages.get) if day_averages else None,
+                    "lowest_day": min(day_averages, key=day_averages.get) if day_averages else None
+                }
+
+    elif pattern_type == "correlation":
+        # Find correlation between different entities
+        if len(valid_entities) > 1:
+            correlations = {}
+            # For simplicity, just check if entities change around the same times
+            for i, entity1 in enumerate(valid_entities[:-1]):
+                for entity2 in valid_entities[i+1:]:
+                    if entity1 in processed_data and entity2 in processed_data:
+                        # Create time-based mapping of changes
+                        changes1 = {point["timestamp"].strftime("%Y-%m-%d %H"): point["value"]
+                                  for point in processed_data[entity1]}
+                        changes2 = {point["timestamp"].strftime("%Y-%m-%d %H"): point["value"]
+                                  for point in processed_data[entity2]}
+
+                        # Find common hours when both entities had changes
+                        common_hours = set(changes1.keys()) & set(changes2.keys())
+                        correlation_score = len(common_hours) / max(len(changes1), len(changes2)) if max(len(changes1), len(changes2)) > 0 else 0
+
+                        correlations[f"{entity1} and {entity2}"] = {
+                            "correlation_score": correlation_score,
+                            "common_change_points": len(common_hours)
+                        }
+            analysis_results["correlations"] = correlations
+
+    elif pattern_type == "trend_analysis":
+        # Calculate overall trends (increasing/decreasing)
+        for entity_id, data_points in processed_data.items():
+            numeric_values = [point["value"] for point in data_points
+                             if isinstance(point["value"], (int, float))]
+
+            if len(numeric_values) > 5:  # Need sufficient data points
+                # Calculate linear regression for trend
+                n = len(numeric_values)
+                indices = list(range(n))
+                sum_x = sum(indices)
+                sum_y = sum(numeric_values)
+                sum_xy = sum(x*y for x, y in zip(indices, numeric_values))
+                sum_xx = sum(x*x for x in indices)
+
+                # Calculate slope
+                if n * sum_xx - sum_x * sum_x != 0:
+                    slope = (n * sum_xy - sum_x * sum_y) / (n * sum_xx - sum_x * sum_x)
+                    intercept = (sum_y - slope * sum_x) / n
+
+                    # Determine trend direction
+                    trend_direction = "increasing" if slope > 0.01 else "decreasing" if slope < -0.01 else "stable"
+
+                    # Calculate recent vs. overall average
+                    recent_values = numeric_values[-min(5, len(numeric_values)):]
+                    recent_avg = sum(recent_values) / len(recent_values)
+                    overall_avg = sum(numeric_values) / len(numeric_values)
+
+                    analysis_results[entity_id] = {
+                        "trend": trend_direction,
+                        "slope": slope,
+                        "recent_vs_overall": recent_avg / overall_avg if overall_avg != 0 else None,
+                        "start_value": numeric_values[0] if numeric_values else None,
+                        "end_value": numeric_values[-1] if numeric_values else None
+                    }
+
+    return {
+        "analysis_type": pattern_type,
+        "time_period": f"{time_period_days} days",
+        "results": analysis_results
+    }
+
+@tool(parse_docstring=True)
+async def run_diagnostics( # noqa: D417
+    target: str,
+    diagnostic_type: str,
+    additional_parameters: dict[str, Any] = None,
+    *,
+    # Hide these arguments from the model.
+    config: Annotated[RunnableConfig, InjectedToolArg()]
+) -> dict[str, Any]:
+    """
+    Diagnoses issues with smart home devices, configurations, or systems.
+
+    Args:
+        target: The target entity, area, or system to diagnose.
+            Such as "light.lounge_lamp_light", "climate", "network", "master_bedroom area"
+        diagnostic_type: Type of diagnostic to run.
+            Options include "connectivity", "performance", "errors",
+            "configuration", "compatibility", "system_health"
+
+    Returns:
+        Dictionary containing diagnostic results, identified issues, and recommendations.
+    """
+    hass = config["configurable"]["hass"]
+
+    # Initialize results dictionary
+    results = {
+        "target": target,
+        "diagnostic_type": diagnostic_type,
+        "timestamp": dt_util.now().isoformat(),
+        "issues": [],
+        "recommendations": []
+    }
+
+    # Validate target exists
+    if target.startswith(("light.", "switch.", "climate.", "automation.", "binary_sensor.")):
+        # Entity-based target
+        entity_registry = hass.data["entity_registry"]
+        if not entity_registry.async_is_registered(target):
+            results["issues"].append(f"Entity {target} not found")
+            return results
+    elif "area" in target:
+        # Area-based target
+        area_name = target.replace(" area", "").strip()
+        area_registry = hass.data["area_registry"]
+        area = next((area for area in area_registry.areas if area.name.lower() == area_name.lower()), None)
+        if not area:
+            results["issues"].append(f"Area {area_name} not found")
+            return results
+    elif target in ["network", "system"]:
+        # System-level diagnostics
+        pass
+    else:
+        results["issues"].append(f"Invalid target type: {target}")
+        return results
+
+    # Run diagnostics based on type
+    if diagnostic_type == "connectivity":
+        # Check entity/area connectivity
+        if target.startswith(("light.", "switch.", "climate.", "automation.", "binary_sensor.")):
+            state = hass.states.get(target)
+            if state is None:
+                results["issues"].append("Device is not responding")
+                results["recommendations"].append("Check device power and network connection")
+            elif state.state == "unavailable":
+                results["issues"].append("Device is unavailable")
+                results["recommendations"].append("Verify device is within range and powered")
+
+    elif diagnostic_type == "performance":
+        # Check response times and reliability
+        duration = additional_parameters.get("duration", 60) if additional_parameters else 60
+
+        if target.startswith(("light.", "switch.", "climate.", "automation.", "binary_sensor.")):
+            # Get recent state changes
+            entity_history = await get_entity_history(
+                entity_ids=[target],
+                local_start_time=(dt_util.utcnow() - timedelta(seconds=duration)).isoformat(),
+                local_end_time=dt_util.utcnow().isoformat(),
+                config=config
+            )
+
+            if entity_history:
+                state_changes = len(next(iter(entity_history.values())))
+                if state_changes > duration/10:  # More than 1 change per 10 seconds
+                    results["issues"].append("High frequency of state changes detected")
+                    results["recommendations"].append("Check for interference or automation loops")
+
+    elif diagnostic_type == "configuration":
+        # Validate entity/area configuration
+        if target.startswith(("light.", "switch.", "climate.", "automation.", "binary_sensor.")):
+            entity_registry = hass.data["entity_registry"]
+            entity = entity_registry.async_get(target)
+
+            if entity and not entity.area_id:
+                results["issues"].append("Entity not assigned to any area")
+                results["recommendations"].append("Assign entity to an area for better organization")
+
+            if entity and not entity.name:
+                results["issues"].append("Entity has no friendly name configured")
+                results["recommendations"].append("Set a friendly name for easier identification")
+
+    elif diagnostic_type == "system_health":
+        # Check overall system health
+        if target == "system":
+            # Check disk usage
+            stats = await hass.async_add_executor_job(os.statvfs, hass.config.config_dir)
+            disk_usage = (stats.f_blocks - stats.f_bfree) * stats.f_frsize
+            total_space = stats.f_blocks * stats.f_frsize
+            usage_percent = (disk_usage / total_space) * 100
+
+            if usage_percent > 90:
+                results["issues"].append(f"High disk usage: {usage_percent:.1f}%")
+                results["recommendations"].append("Clean up old logs and unused files")
+
+    else:
+        results["issues"].append(f"Unsupported diagnostic type: {diagnostic_type}")
+
+    return results
