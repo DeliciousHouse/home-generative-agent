@@ -10,7 +10,6 @@ from datetime import timedelta
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Dict, List
 
-import re
 import aiofiles
 import homeassistant.util.dt as dt_util
 import yaml
@@ -63,34 +62,8 @@ if TYPE_CHECKING:
 LOGGER = logging.getLogger(__name__)
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
-    """Get an image from a given camera using HA or webhook."""
-    options = hass.data[DOMAIN].get("options", {})
-    camera_webhooks = options.get(CONF_CAMERA_WEBHOOKS, DEFAULT_CAMERA_WEBHOOKS)
-
-    # Check if this camera has a webhook URL configured
-    webhook_url = camera_webhooks.get(camera_name.lower().replace(' ', '_'))
-
-    if webhook_url:
-        try:
-            LOGGER.debug("Using webhook URL for camera %s: %s", camera_name, webhook_url)
-            async with aiohttp.ClientSession() as session:
-                async with session.get(webhook_url) as response:
-                    if response.status == 200:
-                        return await response.read()
-                    else:
-                        LOGGER.error(
-                            "Error getting image from webhook for camera '%s'. Status: %s",
-                            camera_name, response.status
-                        )
-        except Exception as err:
-            LOGGER.error(
-                "Error getting image from webhook for camera '%s': %s",
-                camera_name, err
-            )
-            # Fall back to standard HA method if webhook fails
-
-    # Standard HA camera entity method
-    camera_entity_id: str = f"camera.{camera_name.strip().lower().replace(' ', '_')}"
+    """Get an image from a given camera."""
+    camera_entity_id: str = f"camera.{camera_name.lower()}"
     try:
         image = await camera.async_get_image(
             hass=hass,

@@ -243,9 +243,7 @@ def config_option_schema(
             ): str,
             vol.Optional(
                 CONF_CHAT_MODEL_TEMPERATURE,
-                description={
-                    "suggested_value": options.get(CONF_CHAT_MODEL_TEMPERATURE)
-                },
+                description={"suggested_value": options.get(CONF_CHAT_MODEL_TEMPERATURE)},
                 default=RECOMMENDED_CHAT_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
@@ -255,16 +253,12 @@ def config_option_schema(
             ): str,
             vol.Optional(
                 CONF_EDGE_CHAT_MODEL_TEMPERATURE,
-                description={
-                    "suggested_value": options.get(CONF_EDGE_CHAT_MODEL_TEMPERATURE)
-                },
+                description={"suggested_value": options.get(CONF_EDGE_CHAT_MODEL_TEMPERATURE)},
                 default=RECOMMENDED_EDGE_CHAT_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
                 CONF_EDGE_CHAT_MODEL_TOP_P,
-                description={
-                    "suggested_value": options.get(CONF_EDGE_CHAT_MODEL_TOP_P)
-                },
+                description={"suggested_value": options.get(CONF_EDGE_CHAT_MODEL_TOP_P)},
                 default=RECOMMENDED_EDGE_CHAT_MODEL_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
             vol.Optional(
@@ -274,9 +268,7 @@ def config_option_schema(
             ): str,
             vol.Optional(
                 CONF_VISION_MODEL_TEMPERATURE,
-                description={
-                    "suggested_value": options.get(CONF_VISION_MODEL_TEMPERATURE)
-                },
+                description={"suggested_value": options.get(CONF_VISION_MODEL_TEMPERATURE)},
                 default=RECOMMENDED_VISION_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
@@ -291,16 +283,12 @@ def config_option_schema(
             ): str,
             vol.Optional(
                 CONF_SUMMARIZATION_MODEL_TEMPERATURE,
-                description={
-                    "suggested_value": options.get(CONF_SUMMARIZATION_MODEL_TEMPERATURE)
-                },
+                description={"suggested_value": options.get(CONF_SUMMARIZATION_MODEL_TEMPERATURE)},
                 default=RECOMMENDED_SUMMARIZATION_MODEL_TEMPERATURE,
             ): NumberSelector(NumberSelectorConfig(min=0, max=2, step=0.05)),
             vol.Optional(
                 CONF_SUMMARIZATION_MODEL_TOP_P,
-                description={
-                    "suggested_value": options.get(CONF_SUMMARIZATION_MODEL_TOP_P)
-                },
+                description={"suggested_value": options.get(CONF_SUMMARIZATION_MODEL_TOP_P)},
                 default=RECOMMENDED_SUMMARIZATION_MODEL_TOP_P,
             ): NumberSelector(NumberSelectorConfig(min=0, max=1, step=0.05)),
             vol.Optional(
@@ -308,11 +296,6 @@ def config_option_schema(
                 description={"suggested_value": options.get(CONF_EMBEDDING_MODEL)},
                 default=RECOMMENDED_EMBEDDING_MODEL,
             ): str,
-            vol.Optional(
-                CONF_CAMERA_WEBHOOKS,
-                description={"suggested_value": options.get(CONF_CAMERA_WEBHOOKS, DEFAULT_CAMERA_WEBHOOKS)},
-                default=DEFAULT_CAMERA_WEBHOOKS,
-            ): dict,
         }
     )
     return schema
