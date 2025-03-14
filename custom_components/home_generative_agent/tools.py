@@ -63,7 +63,7 @@ LOGGER = logging.getLogger(__name__)
 
 async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | None:
     """Get an image from a given camera."""
-    camera_entity_id: str = f"camera.{camera_name.lower()}"
+    camera_entity_id: str = f"camera.{camera_name.lower().replace(' ', '_')}"
     try:
         image = await camera.async_get_image(
             hass=hass,
@@ -71,15 +71,30 @@ async def _get_camera_image(hass: HomeAssistant, camera_name: str) -> bytes | No
             width=VISION_MODEL_IMAGE_WIDTH,
             height=VISION_MODEL_IMAGE_HEIGHT
         )
+        return image.content
     except HomeAssistantError as err:
         LOGGER.error(
             "Error getting image from camera '%s' with error: %s",
             camera_entity_id, err
         )
-        return None
 
-    return image.content
-
+        # Try with _snapshot appended to the name
+        snapshot_camera_entity_id = f"{camera_entity_id}_snapshot"
+        try:
+            LOGGER.info("Trying snapshot camera: %s", snapshot_camera_entity_id)
+            image = await camera.async_get_image(
+                hass=hass,
+                entity_id=snapshot_camera_entity_id,
+                width=VISION_MODEL_IMAGE_WIDTH,
+                height=VISION_MODEL_IMAGE_HEIGHT
+            )
+            return image.content
+        except HomeAssistantError as snapshot_err:
+            LOGGER.error(
+                "Error getting image from snapshot camera '%s' with error: %s",
+                snapshot_camera_entity_id, snapshot_err
+            )
+            return None
 async def _analyze_image(
         vlm_model: ChatOllama,
         options: dict[str, Any] | MappingProxyType[str, Any],
@@ -611,43 +626,29 @@ async def perform_location_action( # noqa: D417
         return f"Error performing action: {err}"
 
 
-@tool(parse_docstring=True)
-async def reverse_geocode( # noqa: D417
-    latitude: float,
-    longitude: float,
-    *,
-    # Hide these arguments from the model.
-    config: Annotated[RunnableConfig, InjectedToolArg()]
-) -> dict[str, Any]:
-    """
-    Convert latitude and longitude coordinates to a physical address.
+async def reverse_geocode(hass, params):
+    """Get location details from coordinates."""
+    lat = params.get("lat")
+    lon = params.get("lon")
 
-    Args:
-        latitude: Latitude coordinate (such as 38.30662).
-        longitude: Longitude coordinate (such as -122.29125).
+    try:
+        # If using Home Assistant's geocoding integration
+        from homeassistant.components.geocoding import async_get_location
 
-    Returns:
-        Dictionary containing address information.
-    """
-    # Using OpenStreetMap's Nominatim service (free but has usage limits)
-    url = f"https://nominatim.openstreetmap.org/reverse?lat={latitude}&lon={longitude}&format=json"
+        location = await async_get_location(
+            hass, lat, lon, provider="here"  # or whichever provider you use
+        )
 
-    async with aiohttp.ClientSession() as session:
-        async with session.get(url, headers={"User-Agent": "HomeAssistantComponent/1.0"}) as response:
-            if response.status == 200:
-                result = await response.json()
-                return {
-                    "full_address": result.get("display_name", "Unknown location"),
-                    "road": result.get("address", {}).get("road"),
-                    "city": result.get("address", {}).get("city"),
-                    "county": result.get("address", {}).get("county"),
-                    "state": result.get("address", {}).get("state"),
-                    "country": result.get("address", {}).get("country"),
-                    "postcode": result.get("address", {}).get("postcode"),
-                }
-            else:
-                return {"error": f"Failed to geocode: HTTP {response.status}"}
-
+        return {
+            "city": location.get("city"),
+            "state": location.get("state"),
+            "country": location.get("country"),
+            "country_code": location.get("country_code"),
+            "formatted_address": location.get("formatted_address")
+        }
+    except Exception as e:
+        LOGGER.error(f"Error in reverse geocoding: {e}")
+        return {"error": str(e)}
 
 @tool(parse_docstring=True)
 async def suggest_contextual_automation( # noqa: D417

@@ -152,7 +152,7 @@ class HGAConversationEntity(
             self.entry.add_update_listener(self._async_entry_update_listener)
         )
 
-    async def async_will_remove_from_hass() -> None:
+    async def async_will_remove_from_hass(self) -> None:
         """When entity will be removed from Home Assistant."""
         conversation.async_unset_agent(self.hass, self.entry)
         await super().async_will_remove_from_hass()
